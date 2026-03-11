@@ -124,14 +124,16 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### ⚙️ API Key")
-    api_key_input = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        value=os.getenv("ANTHROPIC_API_KEY", ""),
-        help="Get yours at console.anthropic.com",
-    )
-    if api_key_input:
-        os.environ["ANTHROPIC_API_KEY"] = api_key_input
+    if os.getenv("ANTHROPIC_API_KEY"):
+        st.success("API key configured", icon="🔑")
+    else:
+        api_key_input = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            help="Get yours at console.anthropic.com",
+        )
+        if api_key_input:
+            os.environ["ANTHROPIC_API_KEY"] = api_key_input
 
     st.markdown("---")
     st.markdown("### 💡 Example Questions")
