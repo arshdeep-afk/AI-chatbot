@@ -164,10 +164,10 @@ def _parse_json(text: str) -> dict:
     # Fallback
     return {
         "answer": (
-            "I wasn't able to generate a structured response for that question. "
-            "This usually means the question is outside the scope of the FY26 sales dataset "
-            "(e.g. external company data, internet sources, or non-sales topics). "
-            "Try asking about revenue, units, gross margin, countries, categories, or sales directors."
+            "I wasn't able to produce a structured answer for that question. "
+            "Try rephrasing with a specific metric or company — for example: "
+            "*'How does our YTD revenue compare to Medtronic?'* or "
+            "*'Compare our DCB gross margin to industry averages.'*"
         ),
         "query_code": "",
         "x_col": None,

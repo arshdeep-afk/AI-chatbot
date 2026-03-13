@@ -301,14 +301,11 @@ for _i, msg in enumerate(st.session_state.messages):
                 st.markdown(f"<small>🌐 **Sources:** {src_links}</small>",
                             unsafe_allow_html=True)
 
-            # Chart toast / show-hide — only when chart data is available
-            if msg.get("table_json") and msg.get("x_col"):
+            # Charts — only when the user explicitly asked for a graph
+            if msg.get("table_json") and msg.get("x_col") and msg.get("wants_graph"):
                 _type_key = f"chart_type_{_i}"
                 if _type_key not in st.session_state:
-                    # Old messages default to shown (all types); new follow wants_graph
-                    st.session_state[_type_key] = (
-                        ALL_CHART_TYPES if msg.get("wants_graph", True) else None
-                    )
+                    st.session_state[_type_key] = ALL_CHART_TYPES
 
                 # Rebuild comparison DataFrame if competitor_bars were saved
                 _hist_x     = msg["x_col"]
@@ -333,30 +330,17 @@ for _i, msg in enumerate(st.session_state.messages):
                     except Exception:
                         pass
 
-                if st.session_state[_type_key] is None:
-                    # ── Toast prompt ──────────────────────────────────────────
-                    st.markdown(
-                        '<div class="chart-toast">📊 <b>Would you like to visualise this data?</b></div>',
-                        unsafe_allow_html=True,
-                    )
-                    _cols = st.columns(len(_CHART_QUICK_OPTIONS))
-                    for _col, (_label, _types) in zip(_cols, _CHART_QUICK_OPTIONS):
-                        if _col.button(_label, key=f"chartopt_{_label}_{_i}"):
-                            st.session_state[_type_key] = _types or ALL_CHART_TYPES
-                            st.rerun()
-                else:
-                    # ── Charts shown ──────────────────────────────────────────
+                if st.session_state[_type_key] is not None and _hist_result is not None:
                     _hcol, _ = st.columns([1.4, 8.6])
                     if _hcol.button("🙈 Hide", key=f"hide_chart_{_i}"):
                         st.session_state[_type_key] = None
                         st.rerun()
-                    if _hist_result is not None:
-                        try:
-                            render_charts(_hist_result, _hist_x, msg["y_col"],
-                                          _hist_title, selected_theme,
-                                          chart_types=st.session_state[_type_key])
-                        except Exception:
-                            pass
+                    try:
+                        render_charts(_hist_result, _hist_x, msg["y_col"],
+                                      _hist_title, selected_theme,
+                                      chart_types=st.session_state[_type_key])
+                    except Exception:
+                        pass
 
             # Re-render table
             if msg.get("table_json"):
@@ -438,16 +422,15 @@ def process(question: str):
                     st.markdown(f"<small>🌐 **Sources:** {src_links}</small>",
                                 unsafe_allow_html=True)
 
-                # ── Step 4: Charts (tabbed) ───────────────────────────────────
+                # ── Step 4: Charts — only when user asked for a graph ─────────
                 wants_graph = _wants_graph(question)
                 has_charts  = False
-                _ck = f"chart_type_{_new_msg_idx}"
-                # Prime state on first render
-                if _ck not in st.session_state:
-                    st.session_state[_ck] = ALL_CHART_TYPES if wants_graph else None
 
-                if result is not None and x_col:
+                if result is not None and x_col and wants_graph:
                     has_charts = True
+                    _ck = f"chart_type_{_new_msg_idx}"
+                    if _ck not in st.session_state:
+                        st.session_state[_ck] = ALL_CHART_TYPES
 
                     # Build comparison DataFrame when Claude returns competitor_bars
                     chart_result = result
@@ -471,19 +454,7 @@ def process(question: str):
                         except Exception:
                             pass  # fall back to raw result
 
-                    if st.session_state[_ck] is None:
-                        # ── Toast prompt ──────────────────────────────────────
-                        st.markdown(
-                            '<div class="chart-toast">📊 <b>Would you like to visualise this data?</b></div>',
-                            unsafe_allow_html=True,
-                        )
-                        _live_cols = st.columns(len(_CHART_QUICK_OPTIONS))
-                        for _lc, (_lbl, _ltypes) in zip(_live_cols, _CHART_QUICK_OPTIONS):
-                            if _lc.button(_lbl, key=f"chartopt_{_lbl}_{_new_msg_idx}"):
-                                st.session_state[_ck] = _ltypes or ALL_CHART_TYPES
-                                st.rerun()
-                    else:
-                        # ── Charts shown ──────────────────────────────────────
+                    if st.session_state[_ck] is not None:
                         _hcol, _ = st.columns([1.4, 8.6])
                         if _hcol.button("🙈 Hide", key=f"hide_chart_{_new_msg_idx}"):
                             st.session_state[_ck] = None
