@@ -16,6 +16,17 @@ _DANGER = re.compile(
     r"globals|locals|vars|dir|compile)\b"
 )
 
+# Safe import lines Claude may add despite the system prompt saying they're unnecessary
+_SAFE_IMPORT = re.compile(
+    r"^\s*(import\s+(pandas|numpy)(\s+as\s+\w+)?|from\s+(pandas|numpy)\s+import\s+\S+)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _strip_safe_imports(code: str) -> str:
+    """Remove pandas/numpy import lines — already available in the execution namespace."""
+    return _SAFE_IMPORT.sub("", code)
+
 
 def validate_code(code: str) -> Tuple[bool, str]:
     """Return (is_safe, reason). Rejects obviously dangerous patterns."""
@@ -43,6 +54,7 @@ def execute_query(code: str, df: pd.DataFrame, df_all: pd.DataFrame = None) -> T
     if not code or not code.strip():
         return None, "No query code provided"
 
+    code = _strip_safe_imports(code)
     safe, reason = validate_code(code)
     if not safe:
         return None, f"Code validation failed: {reason}"
