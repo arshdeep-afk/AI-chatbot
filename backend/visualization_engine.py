@@ -67,7 +67,13 @@ _BASE_LAYOUT = dict(
     font=dict(family="Arial", size=13, color="#222222"),
     title_font=dict(size=16, color="#111111", family="Arial Black"),
     margin=dict(l=50, r=30, t=65, b=80),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    legend=dict(
+        orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+        bgcolor="rgba(255,255,255,0.95)",
+        bordercolor="#dddddd",
+        borderwidth=1,
+        font=dict(color="#111111", size=12),
+    ),
 )
 
 

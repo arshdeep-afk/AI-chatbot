@@ -26,7 +26,8 @@ from backend.data_loader import (
 )
 from backend.query_engine import execute_query
 from backend.visualization_engine import auto_charts, ALL_CHART_TYPES, COLOR_THEMES
-from ai.query_parser import parse_query
+import streamlit.components.v1 as _components
+from ai.query_parser import parse_query, generate_data_answer
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -61,6 +62,16 @@ st.markdown(
     color: #111111 !important;
 }
 .stChatMessage { padding: .3rem 0; }
+.chart-toast {
+    background: #f0f7ff;
+    border: 1px solid #c8e0f4;
+    border-left: 3px solid #2e6da4;
+    border-radius: 6px;
+    padding: .4rem .8rem;
+    margin: .3rem 0 .4rem;
+    font-size: .9rem;
+    color: #1a3a6c;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -123,9 +134,9 @@ with st.sidebar:
         st.caption(f"✅ {st.session_state.uploaded_name}")
 
     st.markdown("---")
-    st.markdown("### ⚙️ API Key")
+    st.markdown("### ⚙️ API Keys")
     if os.getenv("ANTHROPIC_API_KEY"):
-        st.success("API key configured", icon="🔑")
+        st.success("Anthropic key configured", icon="🔑")
     else:
         api_key_input = st.text_input(
             "Anthropic API Key",
@@ -134,6 +145,17 @@ with st.sidebar:
         )
         if api_key_input:
             os.environ["ANTHROPIC_API_KEY"] = api_key_input
+
+    if os.getenv("TAVILY_API_KEY"):
+        st.success("Web search enabled", icon="🌐")
+    else:
+        tavily_input = st.text_input(
+            "Tavily API Key *(optional)*",
+            type="password",
+            help="Enables live web search for competitor data. Free tier at tavily.com",
+        )
+        if tavily_input:
+            os.environ["TAVILY_API_KEY"] = tavily_input
 
     st.markdown("---")
     st.markdown("### 💡 Example Questions")
@@ -212,6 +234,28 @@ with k4:
 
 st.markdown("---")
 
+# ── Graph keyword detection ────────────────────────────────────────────────────
+_GRAPH_PHRASES = [
+    "graph", "chart", "plot", "visualize", "visualise", "visualisation",
+    "visualization", "diagram", "histogram", "treemap", "trend",
+]
+
+# (label, chart_types list passed to auto_charts, or None = ALL_CHART_TYPES)
+_CHART_QUICK_OPTIONS = [
+    ("📊 Bar",     ["Bar"]),
+    ("📈 Line",    ["Line Trend"]),
+    ("🥧 Pie",     ["Pie / Donut"]),
+    ("📉 Grouped", ["Grouped Bar"]),
+    ("🌲 Treemap", ["Treemap"]),
+    ("✨ All",     None),
+]
+
+def _wants_graph(question: str) -> bool:
+    """Return True if the question explicitly requests a chart/graph."""
+    q = question.lower()
+    return any(p in q for p in _GRAPH_PHRASES)
+
+
 # ── Chart tab labels ───────────────────────────────────────────────────────────
 _CHART_TAB_LABELS = {
     "bar":         "Bar",
@@ -223,14 +267,14 @@ _CHART_TAB_LABELS = {
 }
 
 
-def render_charts(result, x_col, y_col, title, theme):
-    """Generate all applicable chart types and display them in clickable tabs."""
+def render_charts(result, x_col, y_col, title, theme, chart_types=None):
+    """Generate chart types and display them in clickable tabs."""
     charts = auto_charts(
         result,
         x_col=x_col,
         y_col=y_col,
         title=title,
-        chart_types=ALL_CHART_TYPES,
+        chart_types=chart_types or ALL_CHART_TYPES,
         color_theme=theme,
     )
     if not charts:
@@ -245,18 +289,75 @@ def render_charts(result, x_col, y_col, title, theme):
 # ── Chat history display ───────────────────────────────────────────────────────
 st.markdown("### 💬 Ask About Your Data")
 
-for msg in st.session_state.messages:
+for _i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg["role"] == "assistant":
-            # Re-render charts from stored data
+            # Web sources
+            if msg.get("web_sources"):
+                src_links = " · ".join(
+                    f"[{s['title'][:60]}]({s['url']})" for s in msg["web_sources"]
+                )
+                st.markdown(f"<small>🌐 **Sources:** {src_links}</small>",
+                            unsafe_allow_html=True)
+
+            # Chart toast / show-hide — only when chart data is available
             if msg.get("table_json") and msg.get("x_col"):
+                _type_key = f"chart_type_{_i}"
+                if _type_key not in st.session_state:
+                    # Old messages default to shown (all types); new follow wants_graph
+                    st.session_state[_type_key] = (
+                        ALL_CHART_TYPES if msg.get("wants_graph", True) else None
+                    )
+
+                # Rebuild comparison DataFrame if competitor_bars were saved
+                _hist_x     = msg["x_col"]
+                _hist_title = msg.get("chart_title", "")
+                _hist_result = None
                 try:
-                    tbl = pd.read_json(msg["table_json"], orient="split")
-                    render_charts(tbl, msg["x_col"], msg["y_col"],
-                                  msg.get("chart_title", ""), selected_theme)
+                    _hist_result = pd.read_json(msg["table_json"], orient="split")
                 except Exception:
                     pass
+
+                _comp_bars = msg.get("competitor_bars") or []
+                if _comp_bars and _hist_result is not None and msg.get("y_col"):
+                    try:
+                        _y = msg["y_col"]
+                        _our_val = float(_hist_result[_y].sum()) if _y in _hist_result.columns else None
+                        if _our_val is not None:
+                            _comp_rows = [{"Entity": "Our Company (FY26 YTD)", _y: _our_val}]
+                            _comp_rows += [{"Entity": b["label"], _y: b["value"]} for b in _comp_bars]
+                            _hist_result = pd.DataFrame(_comp_rows)
+                            _hist_x      = "Entity"
+                            _hist_title  = _hist_title + " \u2014 Comparison"
+                    except Exception:
+                        pass
+
+                if st.session_state[_type_key] is None:
+                    # ── Toast prompt ──────────────────────────────────────────
+                    st.markdown(
+                        '<div class="chart-toast">📊 <b>Would you like to visualise this data?</b></div>',
+                        unsafe_allow_html=True,
+                    )
+                    _cols = st.columns(len(_CHART_QUICK_OPTIONS))
+                    for _col, (_label, _types) in zip(_cols, _CHART_QUICK_OPTIONS):
+                        if _col.button(_label, key=f"chartopt_{_label}_{_i}"):
+                            st.session_state[_type_key] = _types or ALL_CHART_TYPES
+                            st.rerun()
+                else:
+                    # ── Charts shown ──────────────────────────────────────────
+                    _hcol, _ = st.columns([1.4, 8.6])
+                    if _hcol.button("🙈 Hide", key=f"hide_chart_{_i}"):
+                        st.session_state[_type_key] = None
+                        st.rerun()
+                    if _hist_result is not None:
+                        try:
+                            render_charts(_hist_result, _hist_x, msg["y_col"],
+                                          _hist_title, selected_theme,
+                                          chart_types=st.session_state[_type_key])
+                        except Exception:
+                            pass
+
             # Re-render table
             if msg.get("table_json"):
                 try:
@@ -271,8 +372,8 @@ for msg in st.session_state.messages:
                     f'<div class="insight-box">💡 <b>Insight:</b> {msg["insight"]}</div>',
                     unsafe_allow_html=True,
                 )
-            # Re-render code
-            if msg.get("code"):
+            # Re-render code (only for real data queries)
+            if msg.get("code") and msg.get("x_col"):
                 with st.expander("🔍 Query Code"):
                     st.code(msg["code"], language="python")
 
@@ -286,6 +387,8 @@ def process(question: str):
     with st.chat_message("user"):
         st.markdown(question)
     st.session_state.messages.append({"role": "user", "content": question})
+    # Index the assistant reply will occupy — needed for chart-state keys
+    _new_msg_idx = len(st.session_state.messages)
 
     with st.chat_message("assistant"):
         if not os.getenv("ANTHROPIC_API_KEY"):
@@ -301,35 +404,100 @@ def process(question: str):
                 ]
 
                 # ── Step 1: AI interprets the question ────────────────────────
-                parsed      = parse_query(question, schema_info, history)
-                answer      = parsed.get("answer", "")
-                code        = parsed.get("query_code", "")
-                x_col       = parsed.get("x_col")
-                y_col       = parsed.get("y_col")
-                chart_title = parsed.get("chart_title", question[:60])
-                insight     = parsed.get("insight", "")
+                parsed           = parse_query(question, schema_info, history)
+                answer           = parsed.get("answer", "")
+                code             = parsed.get("query_code", "")
+                x_col            = parsed.get("x_col")
+                y_col            = parsed.get("y_col")
+                chart_title      = parsed.get("chart_title", question[:60])
+                insight          = parsed.get("insight", "")
+                competitor_bars  = parsed.get("competitor_bars") or []
+                web_sources      = parsed.get("_web_sources") or []
 
                 # ── Step 2: Execute generated pandas code ─────────────────────
                 result, err = None, ""
                 if code:
                     result, err = execute_query(code, df, df_all)
 
+                # ── Step 2b: Enrich answer with actual data (Haiku, fast) ──────
+                if result is not None and x_col and not err:
+                    answer, insight = generate_data_answer(
+                        question, result, answer, insight
+                    )
+
                 # ── Step 3: Display text answer ───────────────────────────────
-                st.markdown(f"**{answer}**")
+                st.markdown(answer)
                 if err:
                     st.warning(f"ℹ️ Query note: {err}")
 
+                # ── Step 3b: Web sources ──────────────────────────────────────
+                if web_sources:
+                    src_links = " · ".join(
+                        f"[{s['title'][:60]}]({s['url']})" for s in web_sources
+                    )
+                    st.markdown(f"<small>🌐 **Sources:** {src_links}</small>",
+                                unsafe_allow_html=True)
+
                 # ── Step 4: Charts (tabbed) ───────────────────────────────────
-                if result is not None:
-                    try:
-                        render_charts(result, x_col, y_col, chart_title, selected_theme)
-                    except Exception as e:
-                        st.warning(f"Chart generation note: {e}")
+                wants_graph = _wants_graph(question)
+                has_charts  = False
+                _ck = f"chart_type_{_new_msg_idx}"
+                # Prime state on first render
+                if _ck not in st.session_state:
+                    st.session_state[_ck] = ALL_CHART_TYPES if wants_graph else None
+
+                if result is not None and x_col:
+                    has_charts = True
+
+                    # Build comparison DataFrame when Claude returns competitor_bars
+                    chart_result = result
+                    chart_x      = x_col
+                    chart_title_ = chart_title
+                    if competitor_bars and y_col:
+                        try:
+                            if isinstance(result, pd.Series):
+                                our_val = float(result.sum())
+                            elif isinstance(result, pd.DataFrame) and y_col in result.columns:
+                                our_val = float(result[y_col].sum())
+                            else:
+                                our_val = None
+                            if our_val is not None:
+                                comp_rows = [{"Entity": "Our Company (FY26 YTD)", y_col: our_val}]
+                                comp_rows += [{"Entity": b["label"], y_col: b["value"]}
+                                              for b in competitor_bars]
+                                chart_result = pd.DataFrame(comp_rows)
+                                chart_x      = "Entity"
+                                chart_title_ = chart_title + " — Comparison"
+                        except Exception:
+                            pass  # fall back to raw result
+
+                    if st.session_state[_ck] is None:
+                        # ── Toast prompt ──────────────────────────────────────
+                        st.markdown(
+                            '<div class="chart-toast">📊 <b>Would you like to visualise this data?</b></div>',
+                            unsafe_allow_html=True,
+                        )
+                        _live_cols = st.columns(len(_CHART_QUICK_OPTIONS))
+                        for _lc, (_lbl, _ltypes) in zip(_live_cols, _CHART_QUICK_OPTIONS):
+                            if _lc.button(_lbl, key=f"chartopt_{_lbl}_{_new_msg_idx}"):
+                                st.session_state[_ck] = _ltypes or ALL_CHART_TYPES
+                                st.rerun()
+                    else:
+                        # ── Charts shown ──────────────────────────────────────
+                        _hcol, _ = st.columns([1.4, 8.6])
+                        if _hcol.button("🙈 Hide", key=f"hide_chart_{_new_msg_idx}"):
+                            st.session_state[_ck] = None
+                            st.rerun()
+                        try:
+                            render_charts(chart_result, chart_x, y_col, chart_title_,
+                                          selected_theme, chart_types=st.session_state[_ck])
+                        except Exception as e:
+                            st.warning(f"Chart generation note: {e}")
 
                 # ── Step 5: Data table ────────────────────────────────────────
                 result_df = None
                 table_json = ""
-                if result is not None:
+                if result is not None and x_col:
                     if isinstance(result, pd.Series):
                         result_df = result.reset_index()
                     elif isinstance(result, pd.DataFrame):
@@ -353,26 +521,38 @@ def process(question: str):
                     )
 
                 # ── Step 7: Query code (collapsed) ────────────────────────────
-                if code:
+                if code and x_col:
                     with st.expander("🔍 Query Code"):
                         st.code(code, language="python")
 
                 # ── Save to history ───────────────────────────────────────────
                 st.session_state.messages.append({
-                    "role":        "assistant",
-                    "content":     f"**{answer}**",
-                    "insight":     insight,
-                    "table_json":  table_json,
-                    "code":        code,
-                    "x_col":       x_col,
-                    "y_col":       y_col,
-                    "chart_title": chart_title,
+                    "role":             "assistant",
+                    "content":          answer,
+                    "insight":          insight,
+                    "table_json":       table_json,
+                    "code":             code,
+                    "x_col":            x_col,
+                    "y_col":            y_col,
+                    "chart_title":      chart_title,
+                    "wants_graph":      wants_graph,
+                    "has_charts":       has_charts,
+                    "competitor_bars":  competitor_bars,
+                    "web_sources":      web_sources,
                 })
+                # _ck / _new_msg_idx already primed in Step 4 above
 
             except Exception as exc:
                 st.error(f"❌ Error: {exc}")
                 with st.expander("Debug traceback"):
                     st.code(traceback.format_exc())
+
+    # Scroll to bottom after new content is rendered
+    _components.html(
+        "<script>window.parent.document.querySelector("
+        "'[data-testid=\"stAppViewContainer\"] > .main').scrollTo(0, 99999);</script>",
+        height=0,
+    )
 
 
 # ── Chat input ─────────────────────────────────────────────────────────────────

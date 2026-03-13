@@ -12,6 +12,7 @@ import anthropic
 from dotenv import load_dotenv
 
 from ai.prompt_templates import SYSTEM_PROMPT
+from ai.web_search import needs_web_search, search_competitor_data
 
 load_dotenv()
 
@@ -48,10 +49,20 @@ def parse_query(
         # Include last 3 user-assistant pairs for context
         messages.extend(history[-6:])
 
-    messages.append({
-        "role": "user",
-        "content": f"SCHEMA:\n{schema_info}\n\nQUESTION: {question}",
-    })
+    user_content = f"SCHEMA:\n{schema_info}\n\nQUESTION: {question}"
+
+    # Enrich with live web search results when competitor/external data is needed
+    web_sources: list = []
+    if needs_web_search(question):
+        web_snippets, web_sources = search_competitor_data(question)
+        if web_snippets:
+            user_content += (
+                "\n\n─── LIVE WEB SEARCH RESULTS (use these for competitor context) ───\n"
+                + web_snippets
+                + "\n─── END WEB SEARCH RESULTS ───"
+            )
+
+    messages.append({"role": "user", "content": user_content})
 
     # Stream with adaptive thinking (Opus 4.6 recommended approach)
     with client.messages.stream(
@@ -70,7 +81,67 @@ def parse_query(
             raw_text = block.text.strip()
             break
 
-    return _parse_json(raw_text)
+    result = _parse_json(raw_text)
+    # Attach web sources so app.py can display them as clickable links
+    result["_web_sources"] = web_sources
+    return result
+
+
+def generate_data_answer(
+    question: str,
+    result,
+    preliminary_answer: str = "",
+    preliminary_insight: str = "",
+) -> tuple:
+    """Generate a data-aware answer + insight using actual query results.
+
+    Makes a fast Haiku call with the real result rows so the response
+    contains specific numbers, names, and percentages.
+    Returns (answer, insight) — falls back to preliminary values on failure.
+    """
+    import pandas as pd
+
+    client = _get_client()
+
+    if isinstance(result, pd.Series):
+        result_df = result.reset_index()
+    elif isinstance(result, pd.DataFrame):
+        result_df = result.copy()
+    else:
+        return preliminary_answer, preliminary_insight
+
+    row_count = len(result_df)
+    sample_str = result_df.head(20).to_string(index=False)
+
+    prompt = (
+        f'User question: "{question}"\n\n'
+        f"Query returned {row_count} row(s). Internal data sample:\n{sample_str}\n\n"
+        "Write a response that combines the internal data above with any relevant "
+        "competitor/industry knowledge you have (citing source + period in parentheses).\n"
+        "1. answer — 3-5 sentences. Lead with the specific internal finding (numbers, names). "
+        "Then add competitor or industry context if the question calls for it. "
+        "Use **bold** for key figures and names. Sound like a knowledgeable analyst colleague.\n"
+        "2. insight — 2-3 sentences with concrete percentages, comparisons, or business "
+        "implications. If comparing to competitors, note data currency.\n\n"
+        'Return VALID JSON only: {"answer": "...", "insight": "..."}'
+    )
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=900,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE).strip()
+        parsed = json.loads(text)
+        return (
+            parsed.get("answer", preliminary_answer),
+            parsed.get("insight", preliminary_insight),
+        )
+    except Exception:
+        return preliminary_answer, preliminary_insight
 
 
 def _parse_json(text: str) -> dict:
@@ -92,7 +163,12 @@ def _parse_json(text: str) -> dict:
 
     # Fallback
     return {
-        "answer": "I couldn't parse the response. Please rephrase your question.",
+        "answer": (
+            "I wasn't able to generate a structured response for that question. "
+            "This usually means the question is outside the scope of the FY26 sales dataset "
+            "(e.g. external company data, internet sources, or non-sales topics). "
+            "Try asking about revenue, units, gross margin, countries, categories, or sales directors."
+        ),
         "query_code": "",
         "x_col": None,
         "y_col": None,
